@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>서울 러닝코스 추천</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Kakao Map SDK (autoload=false) -->
+  <script src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=e2b96008c7e60b6742a35b41e413f6b2&libraries=services&autoload=false"></script>
+  <style>
+    :root { --border:#eaeaea; --muted:#666; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, 'Noto Sans KR', sans-serif; }
+    header { padding: 12px 16px; border-bottom: 1px solid var(--border); }
+    main { display: grid; grid-template-columns: 360px 1fr; height: calc(100vh - 56px); }
+    aside { padding: 16px; overflow: auto; border-right: 1px solid var(--border); }
+    #map { width: 100%; height: 100%; }
+    label { display:block; margin: 8px 0 4px; font-weight: 600; }
+    select, input, button { width:100%; padding:10px; border:1px solid #ddd; border-radius:8px; font-size:14px; }
+    button { margin-top:12px; background:#111; color:#fff; cursor:pointer; }
+    .card { border:1px solid var(--border); border-radius:10px; padding:12px; margin-top:12px; }
+    .muted { color:var(--muted); font-size:12px; }
+    .row { display:flex; gap:8px; }
+    .row > * { flex:1; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; background:#f2f2f2; font-size:12px; margin-right:6px; }
+    .cand { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px; border:1px solid #f0f0f0; border-radius:8px; margin-top:8px; }
+    .cand button { width:auto; margin:0; padding:6px 10px; }
+
+    /* --- loading badge + spinner --- */
+    .loading-badge{
+      position: fixed; top: 64px; right: 16px;
+      background: rgba(17,17,17,.9); color:#fff;
+      padding: 8px 12px; border-radius:10px; font-size:13px;
+      display:none; z-index: 9999;
+      box-shadow: 0 6px 18px rgba(0,0,0,.15);
+    }
+    .loading-badge .dot{
+      display:inline-block; width:6px; height:6px; margin-left:6px;
+      border-radius:50%; background:#fff; opacity:.4; animation: blink 1s infinite;
+    }
+    .loading-badge .dot:nth-child(2){ animation-delay:.2s }
+    .loading-badge .dot:nth-child(3){ animation-delay:.4s }
+    @keyframes blink{ 0%,100%{opacity:.2} 50%{opacity:1} }
+    button[disabled]{ opacity:.6; cursor:not-allowed; }
+
+    @media (max-width: 920px) { main { grid-template-columns: 1fr; height:auto; } #map { height: 60vh; } }
+  </style>
+</head>
+<body>
+  <header><strong>서울 러닝코스 추천 </strong></header>
+  <main>
+    <aside>
+      <div>
+        <label for="gu">구(區)</label>
+        <select id="gu">
+          <option>서초구</option><option>강남구</option><option>송파구</option>
+          <option>마포구</option><option>양천구</option><option>영등포구</option>
+          <option>동작구</option><option>은평구</option><option selected>서대문구</option>
+          <option>종로구</option><option>중구</option><option>용산구</option>
+          <option>성동구</option><option>광진구</option><option>동대문구</option>
+          <option>중랑구</option><option>성북구</option><option>강북구</option>
+          <option>도봉구</option><option>노원구</option><option>강서구</option>
+          <option>구로구</option><option>금천구</option><option>관악구</option>
+          <option>강동구</option>
+        </select>
+
+        <div class="row">
+          <div>
+            <label for="hour">시간(0~23시)</label>
+            <input type="number" id="hour" min="0" max="23" value="19" />
+          </div>
+          <div>
+            <label for="terrain">지형</label>
+            <select id="terrain">
+              <option selected>평지</option>
+              <option>경사</option>
+            </select>
+          </div>
+        </div>
+
+        <button type="button" id="runBtn">추천 받기</button>
+      </div>
+
+      <div id="result" class="card" style="display:none;"></div>
+      <div id="cands" class="card" style="display:none;"></div>
+      <p class="muted">Tip: 추천 지점에 마커를 찍고, 파란 점선 경로를 그려줍니다. 실패 시엔 원형 점선 루프를 fallback으로 보여줘요.</p>
+    </aside>
+
+    <div id="map"></div>
+    <!-- 로딩 배지 -->
+    <div id="loadingBadge" class="loading-badge">
+      검색 중… <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    </div>
+  </main>
+
+<script>
+const BASE = "http://127.0.0.1:8002";
+
+let map, marker;
+let routeLine = null;
+let zoomHandler = null;
+
+/* ▼ 로딩 토글 */
+function setLoading(isOn){
+  const btn = document.getElementById('runBtn');
+  const badge = document.getElementById('loadingBadge');
+  if(isOn){
+    btn.dataset._label = btn.textContent;
+    btn.textContent = '검색 중…';
+    btn.setAttribute('disabled', 'disabled');
+    btn.setAttribute('aria-busy', 'true');
+    badge.style.display = 'block';
+  }else{
+    btn.textContent = btn.dataset._label || '추천 받기';
+    btn.removeAttribute('disabled');
+    btn.removeAttribute('aria-busy');
+    badge.style.display = 'none';
+  }
+}
+
+function createMap() {
+  map = new kakao.maps.Map(document.getElementById('map'), {
+    center: new kakao.maps.LatLng(37.5665, 126.9780),
+    level: 6
+  });
+}
+
+function setMarker(lat, lon, title) {
+  if (marker) marker.setMap(null);
+  marker = new kakao.maps.Marker({ position: new kakao.maps.LatLng(lat, lon), title });
+  marker.setMap(map);
+}
+
+/* 원형 점선 루프 (fallback) */
+function drawLoop(lat, lon, km=5) {
+  const R = 6371.0;
+  const r_km = Math.max(0.4, km / (2 * Math.PI));
+  const lat0 = lat * Math.PI/180, lon0 = lon * Math.PI/180;
+  const step = 6;
+  const pts = [];
+  for (let d=0; d<=360; d+=step) {
+    const br = d * Math.PI/180;
+    const latR = Math.asin(Math.sin(lat0)*Math.cos(r_km/R) + Math.cos(lat0)*Math.sin(r_km/R)*Math.cos(br));
+    const lonR = lon0 + Math.atan2(Math.sin(br)*Math.sin(r_km/R)*Math.cos(lat0), Math.cos(r_km/R)-Math.sin(lat0)*Math.sin(latR));
+    pts.push(new kakao.maps.LatLng(latR*180/Math.PI, lonR*180/Math.PI));
+  }
+  if (routeLine) routeLine.setMap(null);
+  routeLine = new kakao.maps.Polyline({
+    map, path: pts, strokeColor: '#1e90ff', strokeOpacity: 0.95, strokeStyle: 'dash', strokeWeight: 3
+  });
+  const bounds = new kakao.maps.LatLngBounds();
+  pts.forEach(p => bounds.extend(p));
+  map.setBounds(bounds, 20, 20, 20, 20);
+}
+
+/* 후보 목록 렌더링 */
+function renderCandidates(list) {
+  const box = document.getElementById('cands');
+  if (!list || !list.length) { box.style.display='none'; return; }
+  const html = ['<strong>상위 후보</strong>','<div style="margin-top:6px;">'];
+  list.forEach((it,i)=>{
+    const safeName = (it.name||'').replace(/'/g,"");
+    html.push(`
+      <div class="cand">
+        <div style="min-width:0;">
+          <div><span class="pill">#${i+1}</span> <strong>${it.name}</strong></div>
+          <div class="muted">${it.addr||''}</div>
+          <div class="muted">거리 ${it.dist_km}km · 신호점수 ${it.signal_free_score} · 추정루프 ${it.est_loop_km}km</div>
+        </div>
+        <button onclick="setMarker(${it.lat},${it.lon},'${safeName}');
+                 drawRealRoute(${it.lat},${it.lon}, Math.max(3, ${it.est_loop_km} * 2.0), 2200, 700);">지도</button>
+      </div>
+    `);
+  });
+  html.push('</div>');
+  box.innerHTML = html.join('');
+  box.style.display = 'block';
+}
+
+/* 구 선택 시 맵 중앙 이동 */
+async function centerToGu(gu) {
+  try {
+    const r = await fetch(`${BASE}/candidates?gu=${encodeURIComponent(gu)}&terrain=${encodeURIComponent('평지')}`);
+    const data = await r.json();
+    if (data && data.center) {
+      map.setCenter(new kakao.maps.LatLng(data.center.lat, data.center.lon));
+      map.setLevel(6);
+    }
+  } catch {}
+}
+
+/* 추천 호출 */
+async function doRecommend() {
+  const gu = document.getElementById('gu').value;
+  const hour = parseInt(document.getElementById('hour').value, 10);
+  const terrain = document.getElementById('terrain').value;
+
+  let data;
+  setLoading(true);
+  try {
+    const r = await fetch(`${BASE}/recommend`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({gu, hour, terrain})
+    });
+    data = await r.json();
+  } catch (e) {
+    alert('서버에 연결할 수 없습니다. (백엔드 실행/포트 확인)');
+    setLoading(false);
+    return;
+  }
+
+  const box = document.getElementById('result');
+  if (data && data.recommended) {
+    const w = data.weather || {};
+    box.innerHTML = `
+      <strong>추천 코스: ${data.recommended.name}</strong>
+      <div class="muted">${data.recommended.addr || ''}</div>
+      <div style="margin-top:6px;">
+        <span class="pill">예보 ${w.hour ?? '-'}시 ${w.temp_c?.toFixed?.(1) ?? '-'}℃</span>
+        <span class="pill">강수 ${Math.round((w.pop||0)*100)}%</span>
+        <span class="pill">PM2.5 ${w.pm25 ?? '-'}</span>
+        <span class="pill">PM10 ${w.pm10 ?? '-'}</span>
+      </div>
+      <p style="margin-top:8px;">${data.reason_korean || ''}</p>
+    `;
+    box.style.display = 'block';
+
+    setMarker(data.recommended.lat, data.recommended.lon, data.recommended.name);
+    await drawRealRoute(
+      data.recommended.lat,
+      data.recommended.lon,
+      Math.max(3, (data.recommended.est_loop_km || 5) * 1.8),
+      2200, 700
+    );
+    renderCandidates(data.top_candidates || []);
+  } else {
+    box.innerHTML = `<strong>추천 실패</strong><div class="muted">${(data && data.message) || '데이터가 부족합니다.'}</div>`;
+    box.style.display = 'block';
+  }
+  setLoading(false);
+}
+
+/* 실제 경로: 실패 시 drawLoop()로 fallback */
+async function drawRealRoute(lat, lon, km=5, radius_m=1500, near_thresh_m=600) {
+  if (routeLine) { routeLine.setMap(null); routeLine = null; }
+  if (zoomHandler) { kakao.maps.event.removeListener(map, 'zoom_changed', zoomHandler); zoomHandler = null; }
+
+  let data;
+  try {
+    const r = await fetch(`${BASE}/route?lat=${lat}&lon=${lon}&km=${km}&radius_m=${radius_m}&near_thresh_m=${near_thresh_m}`);
+    data = await r.json();
+  } catch (e) {
+    drawLoop(lat, lon, km);
+    return;
+  }
+
+  if (!data || !Array.isArray(data.polyline) || data.polyline.length === 0) {
+    drawLoop(lat, lon, km);
+    return;
+  }
+
+  const path = data.polyline.map(([la, lo]) => new kakao.maps.LatLng(la, lo));
+  routeLine = new kakao.maps.Polyline({
+    map, path,
+    strokeColor: '#1e90ff',
+    strokeOpacity: 0.95,
+    strokeStyle: 'shortdash',
+    strokeWeight: 3
+  });
+
+  const applyDashByZoom = () => {
+    const lvl = map.getLevel();
+    let style, weight;
+    if (lvl >= 8)      { style = 'longdash';  weight = 2; }
+    else if (lvl >= 6) { style = 'dash';      weight = 3; }
+    else if (lvl >= 4) { style = 'shortdash'; weight = 3; }
+    else               { style = 'shortdot';  weight = 4; }
+    routeLine.setOptions({ strokeStyle: style, strokeWeight: weight });
+  };
+  applyDashByZoom();
+  zoomHandler = applyDashByZoom;
+  kakao.maps.event.addListener(map, 'zoom_changed', zoomHandler);
+
+  const bounds = new kakao.maps.LatLngBounds();
+  path.forEach(p => bounds.extend(p));
+  map.setBounds(bounds, 20, 20, 20, 20);
+}
+
+/* 초기화 */
+kakao.maps.load(() => {
+  createMap();
+  const guSel = document.getElementById('gu');
+  guSel.addEventListener('change', e => centerToGu(e.target.value));
+  centerToGu(guSel.value);
+  document.getElementById('runBtn').addEventListener('click', doRecommend);
+});
+</script>
+</body>
+</html>
