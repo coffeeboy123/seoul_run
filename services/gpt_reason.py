@@ -110,7 +110,7 @@ def _call_openai_reason(payload: Dict, tone: Optional[str] = None, timeout: floa
 
 # ── (D) 공개 함수: 앱에서 이 함수만 호출하면 됨 ────────────────────────────────
 # services/gpt_reason.py
-USE_TEMPLATE_ONLY_FOR_EVAL = True  # ★ 평가 시 True
+USE_TEMPLATE_ONLY_FOR_EVAL = False  # ★ 평가 시 True
 
 def build_reason_korean(payload: Dict, *, tone: Optional[str] = "friendly") -> str:
     key = _cache_key(payload, tone)
